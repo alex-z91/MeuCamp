@@ -42,6 +42,9 @@ class EntryIn(BaseModel):
     base_cents:int=Field(ge=0,le=100000000)
 class ExternalConfirmation(BaseModel):
     organizer_id:uuid.UUID
+    payment_method:Literal['pix','cash','card','transfer','other']='other'
+    late_override:bool=False
+    reason:str|None=Field(default=None,max_length=500)
 
 def require_origin(request):
     from main import trusted_request
@@ -141,8 +144,15 @@ async def confirm_external(entry_id:uuid.UUID,p:ExternalConfirmation,request:Req
         entry=await conn.fetchrow("SELECT * FROM public.sport_entries WHERE id=$1 AND organizer_id=$2 FOR UPDATE",entry_id,p.organizer_id)
         if not entry:raise HTTPException(404,"Inscrição não encontrada")
         if entry["payment_status"]=="external_confirmed":return {"ok":True,"duplicate":True}
-        if await conn.fetchval("SELECT registration_closed_at IS NOT NULL OR (registration_deadline IS NOT NULL AND now()>=registration_deadline) FROM public.sport_events WHERE id=$1",entry["event_id"]):
-            raise HTTPException(409,"Inscrições encerradas. A regularização financeira exige revisão administrativa antes do chaveamento")
+        closed=await conn.fetchval("SELECT registration_closed_at IS NOT NULL OR (registration_deadline IS NOT NULL AND now()>=registration_deadline) FROM public.sport_events WHERE id=$1",entry["event_id"])
+        if closed:
+            if not p.late_override:
+                raise HTTPException(409,"Inscrições encerradas. Use a regularização administrativa justificada antes da geração das chaves")
+            if not p.reason or len(p.reason.strip())<10:
+                raise HTTPException(422,"Regularização tardia exige justificativa de pelo menos 10 caracteres")
+            await authorized(request,p.organizer_id,"organizer.events.manage")
+            if await conn.fetchval("SELECT EXISTS(SELECT 1 FROM public.sport_brackets WHERE event_id=$1 AND organizer_id=$2)",entry["event_id"],p.organizer_id):
+                raise HTTPException(409,"Chaves já geradas. Não é permitido liberar atleta após o chaveamento")
         if entry["payment_status"]!="pending" or entry["base_cents"]==0:raise HTTPException(409,"Inscrição não elegível à confirmação externa")
         cfg=await policy(conn,p.organizer_id)
         cost=commission(entry["base_cents"],cfg["percent_bps"],cfg["fixed_cents"])
@@ -157,8 +167,9 @@ async def confirm_external(entry_id:uuid.UUID,p:ExternalConfirmation,request:Req
           (organizer_id,registration_id,entry_type,amount_cents,created_by)
           VALUES($1,$2,'external_commission',$3,$4)""",p.organizer_id,finance["id"],cost,user.user_id)
         await conn.execute("UPDATE public.sport_entries SET payment_status='external_confirmed',eligible=true WHERE id=$1",entry_id)
-        await conn.execute("""INSERT INTO public.finance_audit(organizer_id,actor_user_id,action,reference_id)
-          VALUES($1,$2,'sport_entry_external_confirmed',$3)""",p.organizer_id,user.user_id,finance["id"])
+        audit_details="Forma: "+p.payment_method+("; Regularização tardia: "+p.reason.strip() if closed else "")
+        await conn.execute("""INSERT INTO public.finance_audit(organizer_id,actor_user_id,action,reference_id,details)
+          VALUES($1,$2,'sport_entry_external_confirmed',$3,$4)""",p.organizer_id,user.user_id,finance["id"],audit_details)
     return {"ok":True,"commission_cents":cost,"debt_cents":max(0,debt)+cost}
 
 class UndoExternalConfirmation(BaseModel):
@@ -176,6 +187,8 @@ async def reverse_external(entry_id:uuid.UUID,p:UndoExternalConfirmation,request
         entry=await conn.fetchrow("SELECT * FROM public.sport_entries WHERE id=$1 AND organizer_id=$2 FOR UPDATE",entry_id,p.organizer_id)
         if not entry:raise HTTPException(404,"Inscrição não encontrada")
         if entry["payment_status"]!="external_confirmed":raise HTTPException(409,"Somente pagamentos presenciais confirmados podem ser revertidos aqui")
+        if await conn.fetchval("SELECT EXISTS(SELECT 1 FROM public.sport_brackets WHERE event_id=$1 AND organizer_id=$2)",entry["event_id"],p.organizer_id):
+            raise HTTPException(409,"Há chaves geradas. Revise o chaveamento antes de estornar a inscrição")
         registration=await conn.fetchrow("""SELECT id,commission_cents FROM public.finance_registrations
             WHERE organizer_id=$1 AND reference=$2 AND payment_channel='external'
             AND payment_status='confirmed' FOR UPDATE""",p.organizer_id,str(entry_id))
