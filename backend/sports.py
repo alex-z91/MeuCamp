@@ -16,6 +16,7 @@ class EventIn(BaseModel):
     has_nogi:bool=False
     has_absolute:bool=False
     registration_deadline:datetime|None=None
+    payment_deadline:datetime|None=None
 class AthleteIn(BaseModel):
     organizer_id:uuid.UUID
     full_name:str=Field(min_length=3,max_length=160)
@@ -53,13 +54,17 @@ async def create_event(p:EventIn,request:Request):
     user=await authorized(request,p.organizer_id,"organizer.events.manage")
     if not p.has_gi and not p.has_nogi:
         raise HTTPException(422,"Selecione Gi, No-Gi ou ambos")
+    if p.payment_deadline and not p.registration_deadline:
+        raise HTTPException(422,"Defina o prazo de inscrições antes do prazo de pagamento")
+    if p.payment_deadline and p.registration_deadline and p.payment_deadline <= p.registration_deadline:
+        raise HTTPException(422,"O prazo de pagamento deve ser posterior ao encerramento das inscrições")
     async with request.app.state.pool.acquire() as conn:
       async with conn.transaction():
         row=await conn.fetchrow("""INSERT INTO public.sport_events
-            (organizer_id,name,event_date,city,created_by,has_gi,has_nogi,has_absolute,registration_deadline)
-            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id::text,status""",
+            (organizer_id,name,event_date,city,created_by,has_gi,has_nogi,has_absolute,registration_deadline,payment_deadline)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id::text,status""",
             p.organizer_id,p.name.strip(),p.event_date,p.city.strip(),user.user_id,
-            p.has_gi,p.has_nogi,p.has_absolute,p.registration_deadline)
+            p.has_gi,p.has_nogi,p.has_absolute,p.registration_deadline,p.payment_deadline)
         created=await build_default_categories(conn,p.organizer_id,uuid.UUID(row["id"]),p.event_date.year,
             [m for m,enabled in (("gi",p.has_gi),("nogi",p.has_nogi)) if enabled],p.has_absolute)
     return {**dict(row),"categories_created":created}
@@ -67,7 +72,7 @@ async def create_event(p:EventIn,request:Request):
 @router.get("/events/{organizer_id}")
 async def list_events(organizer_id:uuid.UUID,request:Request):
     await authorized(request,organizer_id,"organizer.events.read")
-    rows=await request.app.state.pool.fetch("""SELECT id::text,name,event_date,city,status,has_gi,has_nogi,has_absolute,registration_deadline,registration_closed_at,public_roster_enabled FROM public.sport_events
+    rows=await request.app.state.pool.fetch("""SELECT id::text,name,event_date,city,status,has_gi,has_nogi,has_absolute,registration_deadline,payment_deadline,registration_closed_at,public_roster_enabled FROM public.sport_events
         WHERE organizer_id=$1 ORDER BY event_date DESC LIMIT 100""",organizer_id)
     return {"items":[dict(row) for row in rows]}
 
@@ -141,8 +146,16 @@ async def confirm_external(entry_id:uuid.UUID,p:ExternalConfirmation,request:Req
         entry=await conn.fetchrow("SELECT * FROM public.sport_entries WHERE id=$1 AND organizer_id=$2 FOR UPDATE",entry_id,p.organizer_id)
         if not entry:raise HTTPException(404,"Inscrição não encontrada")
         if entry["payment_status"]=="external_confirmed":return {"ok":True,"duplicate":True}
-        if await conn.fetchval("SELECT registration_closed_at IS NOT NULL OR (registration_deadline IS NOT NULL AND now()>=registration_deadline) FROM public.sport_events WHERE id=$1",entry["event_id"]):
-            raise HTTPException(409,"Inscrições encerradas. A regularização financeira exige revisão administrativa antes do chaveamento")
+        cutoff=await conn.fetchrow("""SELECT payment_deadline,registration_closed_at,registration_deadline
+            FROM public.sport_events WHERE id=$1 AND organizer_id=$2 FOR UPDATE""",entry["event_id"],p.organizer_id)
+        if not cutoff:raise HTTPException(404,"Evento não encontrado")
+        if await conn.fetchval("SELECT 1 FROM public.sport_brackets WHERE event_id=$1 LIMIT 1",entry["event_id"]):
+            raise HTTPException(409,"Chaves já geradas. Solicite revisão administrativa antes de alterar pagamentos.")
+        if cutoff["payment_deadline"] is not None:
+            if cutoff["payment_deadline"]<=datetime.now(cutoff["payment_deadline"].tzinfo):
+                raise HTTPException(409,"Prazo de pagamento encerrado. Regularizações exigem revisão administrativa.")
+        elif cutoff["registration_closed_at"] or (cutoff["registration_deadline"] and cutoff["registration_deadline"]<=datetime.now(cutoff["registration_deadline"].tzinfo)):
+            raise HTTPException(409,"Inscrições encerradas. Configure um prazo de pagamento separado antes de confirmar.")
         if entry["payment_status"]!="pending" or entry["base_cents"]==0:raise HTTPException(409,"Inscrição não elegível à confirmação externa")
         cfg=await policy(conn,p.organizer_id)
         cost=commission(entry["base_cents"],cfg["percent_bps"],cfg["fixed_cents"])
@@ -176,6 +189,8 @@ async def reverse_external(entry_id:uuid.UUID,p:UndoExternalConfirmation,request
         entry=await conn.fetchrow("SELECT * FROM public.sport_entries WHERE id=$1 AND organizer_id=$2 FOR UPDATE",entry_id,p.organizer_id)
         if not entry:raise HTTPException(404,"Inscrição não encontrada")
         if entry["payment_status"]!="external_confirmed":raise HTTPException(409,"Somente pagamentos presenciais confirmados podem ser revertidos aqui")
+        if await conn.fetchval("SELECT 1 FROM public.sport_brackets WHERE event_id=$1 LIMIT 1",entry["event_id"]):
+            raise HTTPException(409,"Chaves já geradas. A reversão exige revisão administrativa para preservar o chaveamento.")
         registration=await conn.fetchrow("""SELECT id,commission_cents FROM public.finance_registrations
             WHERE organizer_id=$1 AND reference=$2 AND payment_channel='external'
             AND payment_status='confirmed' FOR UPDATE""",p.organizer_id,str(entry_id))
@@ -536,10 +551,11 @@ async def generate_brackets(event_id:uuid.UUID,p:BracketAction,request:Request):
     count=0;matches=0
     async with request.app.state.pool.acquire() as conn:
       async with conn.transaction():
-        event=await conn.fetchrow("SELECT registration_closed_at,registration_deadline,status FROM public.sport_events WHERE id=$1 AND organizer_id=$2 FOR UPDATE",event_id,p.organizer_id)
+        event=await conn.fetchrow("SELECT registration_closed_at,registration_deadline,payment_deadline,status FROM public.sport_events WHERE id=$1 AND organizer_id=$2 FOR UPDATE",event_id,p.organizer_id)
         if not event:raise HTTPException(404,"Evento não encontrado")
         if event["status"] in ("closed","cancelled"):raise HTTPException(409,"Evento indisponível")
         if not (event["registration_closed_at"] or (event["registration_deadline"] and event["registration_deadline"]<=datetime.now(event["registration_deadline"].tzinfo))):raise HTTPException(409,"Encerre as inscrições antes de gerar chaves")
+        if event["payment_deadline"] and event["payment_deadline"]>datetime.now(event["payment_deadline"].tzinfo):raise HTTPException(409,"Aguarde o encerramento do prazo de pagamento para gerar chaves")
         if await conn.fetchval("SELECT COUNT(*) FROM public.sport_brackets WHERE event_id=$1",event_id):raise HTTPException(409,"Chaves já geradas. Não serão sobrescritas automaticamente")
         rows=await conn.fetch("""SELECT e.id entry_id,e.category_id,a.team FROM public.sport_entries e
            JOIN public.sport_athletes a ON a.id=e.athlete_id WHERE e.event_id=$1 AND e.organizer_id=$2 AND e.eligible=true
