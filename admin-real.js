@@ -22,51 +22,60 @@ function financePage(){return '<section class="panel"><h1>Financeiro</h1><p>Sald
 function render(){shell();root.innerHTML=({dashboard:overview,registrations,athletes:athletesPage,categories:categoriesPage,finance:financePage,brackets:bracketsPage})[tab]();root.querySelectorAll('.table-wrap table').forEach(table=>{const heads=[...table.querySelectorAll('thead th')].map(th=>th.textContent.trim());table.querySelectorAll('tbody tr').forEach(tr=>{[...tr.querySelectorAll('td')].forEach((td,i)=>{if(!td.hasAttribute('colspan'))td.dataset.label=heads[i]||''})})});if(tab==='brackets')loadBracketPreview().catch(err=>message(err.message,'error'))}
 async function loadOrg(){events=(await api('/api/sports/events/'+orgId)).items;eventId=events.find(x=>x.id===eventId)?.id||events[0]?.id||'';athletes=(await api('/api/sports/athletes/'+orgId)).items;await loadEvent()}
 async function loadEvent(){if(eventId){const [e,c]=await Promise.all([api('/api/sports/entries/'+orgId+'/'+eventId),api('/api/sports/categories/'+orgId+'/'+eventId)]);entries=e.items;categories=c.items}else{entries=[];categories=[]}render()}
-const confirming=new Set();
-async function confirmDirect(id,button){
-if(confirming.has(id))return;
-const target=entries.find(x=>x.id===id);
-if(!target||target.payment_status!=='pending')return;
-const selected=window.prompt('Forma de recebimento: 1 = Pix, 2 = Dinheiro, 3 = Cartão, 4 = Transferência, 5 = Outro','1');
-if(selected===null)return;
-const payment_method=({'1':'pix','2':'cash','3':'card','4':'transfer','5':'other'})[selected.trim()];
-if(!payment_method){message('Escolha uma forma de recebimento entre 1 e 5.','error');return}
-if(!window.confirm('Confirmar recebimento de '+money(target.base_cents)+' para '+target.full_name+'?'))return;
-confirming.add(id);button.disabled=true;button.textContent='Confirmando…';
-const sourceOrg=orgId,sourceEvent=eventId;
+const paymentDialog=document.createElement('dialog');
+paymentDialog.id='payment-dialog';
+paymentDialog.className='arena-payment-dialog';
+paymentDialog.innerHTML='<form id="payment-dialog-form" class="payment-modal"><header class="payment-modal-header"><div><span class="payment-eyebrow">ARENA PRO · FINANCEIRO</span><h2 id="payment-modal-title">Confirmar pagamento</h2><p id="payment-modal-description">Registre um pagamento recebido fora da plataforma.</p></div><button type="button" class="payment-close" aria-label="Fechar" data-payment-close>×</button></header><div class="payment-modal-body"><div class="payment-athlete"><span>ATLETA</span><strong id="payment-athlete-name"></strong><small id="payment-athlete-category"></small><div class="payment-amount"><span>Valor da inscrição</span><strong id="payment-amount"></strong></div></div><div id="payment-method-area"><label class="payment-field-title">Como o pagamento foi recebido?</label><div class="payment-method-grid"><label><input type="radio" name="payment_method" value="pix" checked><span>Pix</span></label><label><input type="radio" name="payment_method" value="cash"><span>Dinheiro</span></label><label><input type="radio" name="payment_method" value="card"><span>Cartão</span></label><label><input type="radio" name="payment_method" value="transfer"><span>Transferência</span></label><label><input type="radio" name="payment_method" value="other"><span>Outro</span></label></div></div><div id="payment-reason-area" hidden><label class="payment-field-title" for="payment-reason">Justificativa administrativa</label><textarea id="payment-reason" name="reason" minlength="10" maxlength="500" rows="3" placeholder="Descreva o motivo (mínimo de 10 caracteres)"></textarea><p id="payment-reason-help" class="payment-help"></p></div><p id="payment-modal-alert" class="payment-alert" role="alert" hidden></p></div><footer class="payment-modal-footer"><button type="button" class="btn" data-payment-close>Cancelar</button><button type="submit" id="payment-modal-submit" class="btn primary">Confirmar recebimento</button></footer></form>';
+document.body.append(paymentDialog);
+const paymentForm=paymentDialog.querySelector('form');
+let paymentContext=null;
+function paymentAlert(text){const alert=paymentDialog.querySelector('#payment-modal-alert');alert.textContent=text;alert.hidden=!text}
+function paymentReason(show,help){const area=paymentDialog.querySelector('#payment-reason-area');area.hidden=!show;paymentDialog.querySelector('#payment-reason').required=show;paymentDialog.querySelector('#payment-reason-help').textContent=help||''}
+function openPaymentDialog(id,mode){
+const target=entries.find(x=>x.id===id);if(!target|| (mode==='confirm'&&target.payment_status!=='pending')||(mode==='reverse'&&target.payment_status!=='external_confirmed'))return;
+paymentContext={id,mode,orgId,eventId};paymentForm.reset();paymentAlert('');
+paymentDialog.querySelector('#payment-athlete-name').textContent=target.full_name;
+paymentDialog.querySelector('#payment-athlete-category').textContent=target.category;
+paymentDialog.querySelector('#payment-amount').textContent=money(target.base_cents);
+paymentDialog.querySelector('#payment-modal-title').textContent=mode==='reverse'?'Reverter confirmação':'Confirmar pagamento';
+paymentDialog.querySelector('#payment-modal-description').textContent=mode==='reverse'?'A reversão estorna a comissão e torna a inscrição pendente.':'Confirme somente valores realmente recebidos pelo organizador.';
+paymentDialog.querySelector('#payment-method-area').hidden=mode==='reverse';
+paymentReason(mode==='reverse',mode==='reverse'?'Esta ação será registrada na auditoria.':'');
+paymentDialog.querySelector('#payment-modal-submit').textContent=mode==='reverse'?'Reverter pagamento':'Confirmar recebimento';
+paymentDialog.querySelector('#payment-modal-submit').disabled=false;
+paymentDialog.showModal();
+}
+paymentDialog.addEventListener('click',e=>{if(e.target.closest('[data-payment-close]'))paymentDialog.close();if(e.target===paymentDialog)paymentDialog.close()});
+paymentDialog.addEventListener('close',()=>{paymentContext=null;paymentAlert('')});
+paymentForm.addEventListener('submit',async e=>{
+e.preventDefault();const ctx=paymentContext;if(!ctx)return;
+const submit=paymentDialog.querySelector('#payment-modal-submit'),reason=paymentDialog.querySelector('#payment-reason').value.trim();
+if(paymentDialog.querySelector('#payment-reason-area').hidden===false&&reason.length<10){paymentAlert('Informe uma justificativa com pelo menos 10 caracteres.');return}
+submit.disabled=true;submit.textContent='Salvando…';paymentAlert('');
 try{
-const payload={organizer_id:sourceOrg,payment_method};
+if(ctx.mode==='reverse'){
+await api('/api/sports/entries/'+ctx.id+'/reverse-external',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({organizer_id:ctx.orgId,reason})});
+message('Pagamento revertido, comissão estornada e inscrição pendente.','success');
+}else{
+const payload={organizer_id:ctx.orgId,payment_method:paymentForm.elements.payment_method.value};
+if(!paymentDialog.querySelector('#payment-reason-area').hidden){payload.late_override=true;payload.reason=reason}
 let result;
-try{result=await api('/api/sports/entries/'+id+'/confirm-external',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)})}
+try{result=await api('/api/sports/entries/'+ctx.id+'/confirm-external',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)})}
 catch(err){
-if(!/Inscrições encerradas/.test(err.message))throw err;
-if(!window.confirm('Inscrições encerradas. Solicitar regularização administrativa? Permitido somente antes da geração das chaves.'))throw Error('Confirmação cancelada.');
-const reason=window.prompt('Justificativa administrativa (mínimo 10 caracteres):','Pagamento recebido antes do encerramento.');
-if(reason===null)throw Error('Confirmação cancelada.');
-payload.late_override=true;payload.reason=reason;
-result=await api('/api/sports/entries/'+id+'/confirm-external',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});
+if(!payload.late_override&&/Inscrições encerradas/.test(err.message)){
+paymentReason(true,'Inscrições encerradas: justifique a regularização. A aprovação depende da sua permissão e de ainda não haver chaves geradas.');
+paymentDialog.querySelector('#payment-modal-description').textContent='Regularização administrativa após encerramento';
+paymentDialog.querySelector('#payment-reason').focus();return;
+}throw err;
 }
-if(sourceOrg===orgId&&sourceEvent===eventId){target.payment_status='external_confirmed';target.eligible=true;render()}
 message('Pagamento confirmado. Comissão contabilizada: '+money(result.commission_cents||0)+'.','success');
-if(sourceOrg===orgId&&sourceEvent===eventId)await loadEvent();
-}catch(err){message(err.message,'error');button.disabled=false;button.textContent='Confirmar presencial'}finally{confirming.delete(id)}
 }
-async function reverseDirect(id,button){
-const target=entries.find(x=>x.id===id);
-if(!target||target.payment_status!=='external_confirmed')return;
-const reason=window.prompt('Motivo da reversão (mínimo 10 caracteres):');
-if(reason===null)return;
-if(reason.trim().length<10){message('Descreva o motivo com pelo menos 10 caracteres.','error');return}
-if(!window.confirm('Reverter pagamento de '+target.full_name+'? A comissão será estornada e o atleta deixará de ser elegível.'))return;
-button.disabled=true;
-const sourceOrg=orgId,sourceEvent=eventId;
-try{
-await api('/api/sports/entries/'+id+'/reverse-external',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({organizer_id:sourceOrg,reason:reason.trim()})});
-message('Confirmação revertida, comissão estornada e inscrição novamente pendente.','success');
-if(sourceOrg===orgId&&sourceEvent===eventId)await loadEvent();
-}catch(err){message(err.message,'error');button.disabled=false}
-}
-document.addEventListener('click',async e=>{const page=e.target.closest('[data-page]');if(page){tab=page.dataset.page;query='';editId='';render();return}const resultButton=e.target.closest('[data-result]');if(resultButton){try{const data=await api('/api/sports/events/'+eventId+'/brackets/'+orgId);const match=data.items.find(x=>x.match_id===resultButton.dataset.result);if(!match)return;const dlg=document.getElementById('match-result-dialog');dlg.querySelector('[name=match_id]').value=match.match_id;dlg.querySelector('[name=winner_entry_id]').replaceChildren();for(const [id,name]of [[match.red_entry_id,match.red_name],[match.blue_entry_id,match.blue_name]]){const opt=document.createElement('option');opt.value=id;opt.textContent=name;dlg.querySelector('[name=winner_entry_id]').append(opt)}dlg.querySelector('[name=method]').value='points';dlg.querySelector('[name=notes]').value='';dlg.showModal()}catch(err){message(err.message,'error')}return}const slot=e.target.closest('[data-bracket][data-match][data-side]');if(slot){if(!window.meucampSwapFirst){window.meucampSwapFirst={bracket:slot.dataset.bracket,match:slot.dataset.match,side:slot.dataset.side};slot.textContent='Selecionado';message('Selecione a segunda posição para trocar os atletas.','info');return}const first=window.meucampSwapFirst;window.meucampSwapFirst=null;if(first.bracket!==slot.dataset.bracket){message('Escolha dois atletas da mesma categoria.','error');return}slot.disabled=true;try{await api('/api/sports/brackets/'+first.bracket+'/swap',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({organizer_id:orgId,first_match_id:first.match,first_side:first.side,second_match_id:slot.dataset.match,second_side:slot.dataset.side})});message('Atletas reposicionados no rascunho.','success');await loadBracketPreview()}catch(err){message(err.message,'error');await loadBracketPreview()}return}if(e.target.id==='roster-toggle'){const evt=events.find(x=>x.id===eventId);if(!evt)return;const button=e.target;button.disabled=true;try{const enabled=!evt.public_roster_enabled;await api('/api/sports/events/'+eventId+'/public-roster',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({organizer_id:orgId,enabled})});evt.public_roster_enabled=enabled;message(enabled?'Lista de inscritos liberada para o público.':'Lista pública ocultada.','success');render()}catch(err){message(err.message,'error');button.disabled=false}return}if(e.target.id==='bracket-print'){if(eventId&&orgId)window.open('imprimir-chaves.html?org='+encodeURIComponent(orgId)+'&event='+encodeURIComponent(eventId),'_blank','noopener');return}const bracketButton=e.target.closest('[id^="bracket-"]');if(bracketButton&&eventId){const action={'bracket-close':'close-registrations','bracket-generate':'generate-brackets','bracket-publish':'publish-brackets'}[bracketButton.id];if(action){bracketButton.disabled=true;try{const result=await api('/api/sports/events/'+eventId+'/'+action,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({organizer_id:orgId})});message(action==='close-registrations'?'Inscrições encerradas.':action==='generate-brackets'?'Chaves em rascunho geradas: '+result.brackets_created:'Chaves publicadas.','success');await loadBracketPreview()}catch(err){message(err.message,'error');bracketButton.disabled=false}return}}const pay=e.target.closest('[data-pay]');if(pay){await confirmDirect(pay.dataset.pay,pay);return}const reverse=e.target.closest('[data-reverse]');if(reverse){await reverseDirect(reverse.dataset.reverse,reverse);return}const edit=e.target.closest('[data-edit]');if(edit){editId=edit.dataset.edit;render();return}if(e.target.id==='cancel-edit'){editId='';render()}});
+paymentDialog.close();if(ctx.orgId===orgId&&ctx.eventId===eventId)await loadEvent();
+}catch(err){paymentAlert(err.message);message(err.message,'error')}
+finally{submit.disabled=false;if(paymentContext)submit.textContent=ctx.mode==='reverse'?'Reverter pagamento':'Confirmar recebimento'}
+});
+
+document.addEventListener('click',async e=>{const page=e.target.closest('[data-page]');if(page){tab=page.dataset.page;query='';editId='';render();return}const resultButton=e.target.closest('[data-result]');if(resultButton){try{const data=await api('/api/sports/events/'+eventId+'/brackets/'+orgId);const match=data.items.find(x=>x.match_id===resultButton.dataset.result);if(!match)return;const dlg=document.getElementById('match-result-dialog');dlg.querySelector('[name=match_id]').value=match.match_id;dlg.querySelector('[name=winner_entry_id]').replaceChildren();for(const [id,name]of [[match.red_entry_id,match.red_name],[match.blue_entry_id,match.blue_name]]){const opt=document.createElement('option');opt.value=id;opt.textContent=name;dlg.querySelector('[name=winner_entry_id]').append(opt)}dlg.querySelector('[name=method]').value='points';dlg.querySelector('[name=notes]').value='';dlg.showModal()}catch(err){message(err.message,'error')}return}const slot=e.target.closest('[data-bracket][data-match][data-side]');if(slot){if(!window.meucampSwapFirst){window.meucampSwapFirst={bracket:slot.dataset.bracket,match:slot.dataset.match,side:slot.dataset.side};slot.textContent='Selecionado';message('Selecione a segunda posição para trocar os atletas.','info');return}const first=window.meucampSwapFirst;window.meucampSwapFirst=null;if(first.bracket!==slot.dataset.bracket){message('Escolha dois atletas da mesma categoria.','error');return}slot.disabled=true;try{await api('/api/sports/brackets/'+first.bracket+'/swap',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({organizer_id:orgId,first_match_id:first.match,first_side:first.side,second_match_id:slot.dataset.match,second_side:slot.dataset.side})});message('Atletas reposicionados no rascunho.','success');await loadBracketPreview()}catch(err){message(err.message,'error');await loadBracketPreview()}return}if(e.target.id==='roster-toggle'){const evt=events.find(x=>x.id===eventId);if(!evt)return;const button=e.target;button.disabled=true;try{const enabled=!evt.public_roster_enabled;await api('/api/sports/events/'+eventId+'/public-roster',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({organizer_id:orgId,enabled})});evt.public_roster_enabled=enabled;message(enabled?'Lista de inscritos liberada para o público.':'Lista pública ocultada.','success');render()}catch(err){message(err.message,'error');button.disabled=false}return}if(e.target.id==='bracket-print'){if(eventId&&orgId)window.open('imprimir-chaves.html?org='+encodeURIComponent(orgId)+'&event='+encodeURIComponent(eventId),'_blank','noopener');return}const bracketButton=e.target.closest('[id^="bracket-"]');if(bracketButton&&eventId){const action={'bracket-close':'close-registrations','bracket-generate':'generate-brackets','bracket-publish':'publish-brackets'}[bracketButton.id];if(action){bracketButton.disabled=true;try{const result=await api('/api/sports/events/'+eventId+'/'+action,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({organizer_id:orgId})});message(action==='close-registrations'?'Inscrições encerradas.':action==='generate-brackets'?'Chaves em rascunho geradas: '+result.brackets_created:'Chaves publicadas.','success');await loadBracketPreview()}catch(err){message(err.message,'error');bracketButton.disabled=false}return}}const pay=e.target.closest('[data-pay]');if(pay){openPaymentDialog(pay.dataset.pay,'confirm');return}const reverse=e.target.closest('[data-reverse]');if(reverse){openPaymentDialog(reverse.dataset.reverse,'reverse');return}const edit=e.target.closest('[data-edit]');if(edit){editId=edit.dataset.edit;render();return}if(e.target.id==='cancel-edit'){editId='';render()}});
 document.getElementById('match-result-cancel').addEventListener('click',()=>document.getElementById('match-result-dialog').close());document.getElementById('match-result-form').addEventListener('submit',async e=>{e.preventDefault();const form=e.target;const submit=form.querySelector('[type=submit]');submit.disabled=true;try{const d=Object.fromEntries(new FormData(form));await api('/api/sports/brackets/matches/'+d.match_id+'/result',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({organizer_id:orgId,winner_entry_id:d.winner_entry_id,method:d.method,notes:d.notes})});document.getElementById('match-result-dialog').close();message('Resultado registrado; vencedor encaminhado.','success');await loadBracketPreview()}catch(err){message(err.message,'error')}finally{submit.disabled=false}});
 document.addEventListener('input',e=>{if(e.target.id==='search'||e.target.id==='dashboard-search'){query=e.target.value;const targetId=e.target.id;const cursor=e.target.selectionStart;render();const field=document.getElementById(targetId);field.focus();field.setSelectionRange(cursor,cursor)}});
 document.addEventListener('change',async e=>{try{if(e.target.id==='org-select'){orgId=e.target.value;await loadOrg()}else if(e.target.id==='event-select'){eventId=e.target.value;await loadEvent()}else if(e.target.id==='filter'){filter=e.target.value;render()}}catch(err){message(err.message,'error')}});
