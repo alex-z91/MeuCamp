@@ -189,6 +189,8 @@ async def reverse_external(entry_id:uuid.UUID,p:UndoExternalConfirmation,request
         entry=await conn.fetchrow("SELECT * FROM public.sport_entries WHERE id=$1 AND organizer_id=$2 FOR UPDATE",entry_id,p.organizer_id)
         if not entry:raise HTTPException(404,"Inscrição não encontrada")
         if entry["payment_status"]!="external_confirmed":raise HTTPException(409,"Somente pagamentos presenciais confirmados podem ser revertidos aqui")
+        if await conn.fetchval("SELECT 1 FROM public.sport_brackets WHERE event_id=$1 LIMIT 1",entry["event_id"]):
+            raise HTTPException(409,"Chaves já geradas. A reversão exige revisão administrativa para preservar o chaveamento.")
         registration=await conn.fetchrow("""SELECT id,commission_cents FROM public.finance_registrations
             WHERE organizer_id=$1 AND reference=$2 AND payment_channel='external'
             AND payment_status='confirmed' FOR UPDATE""",p.organizer_id,str(entry_id))
