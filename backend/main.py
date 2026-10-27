@@ -389,6 +389,7 @@ async def organizer_self_signup(payload: OrganizerSelfSignup, request: Request):
     Approval alone controls publication, never account registration.
     """
     trusted_request(request)
+    raise HTTPException(403, "O cadastro de organizadores é exclusivo do Master. Solicite um convite à equipe Arena Pro.")
     normalized = normalize_application(payload)
     existing = await request.app.state.pool.fetchval("SELECT 1 FROM public.organizer_applications WHERE lower(email)=lower($1) AND status IN ('requested','reviewing','approved')",normalized["email"])
     if existing:
@@ -447,6 +448,7 @@ async def resend_organizer_verification(request: Request,
 async def complete_organizer_onboarding(payload: OrganizerApplicationIn, request: Request,
     user: Annotated[Identity, Depends(authenticated)]):
     trusted_request(request)
+    raise HTTPException(403, "O cadastro de organizadores é exclusivo do Master. Solicite um convite à equipe Arena Pro.")
     if not user.email_verified:
         raise HTTPException(403, "Confirme seu e-mail antes de continuar.")
     data = normalize_application(payload)
@@ -469,6 +471,7 @@ async def complete_organizer_onboarding(payload: OrganizerApplicationIn, request
 @app.post("/api/public/organizer-applications", status_code=201)
 async def create_application(payload: OrganizerApplicationIn, request: Request):
     trusted_request(request)
+    raise HTTPException(403, "O cadastro de organizadores é exclusivo do Master. Solicite um convite à equipe Arena Pro.")
     return await submit_application(request.app.state.pool, payload, "public")
 
 
