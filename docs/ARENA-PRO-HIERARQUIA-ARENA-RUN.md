@@ -26,3 +26,16 @@ Organizador cria evento em rascunho e solicita aprovação; Brain revisa e publi
 - Remover telas/rotas legadas de cadastro público somente após checagem de referências e migração de usuários.
 
 Não ativar cobrança real nem excluir registros de produção como parte desta mudança de hierarquia.
+
+
+## Execução em 27/10/2026
+- CONCLUÍDO NO CÓDIGO: bloqueio HTTP 403 em três caminhos de criação independente de organizador (cadastro público, solicitação pública, completar cadastro de conta existente). A equipe Master usa a rota autenticada de criação com convite.
+- CONCLUÍDO NO CÓDIGO: telas antigas de inscrição pública passam a orientar acesso por convite, sem formulários ou scripts sem uso. Login sem vínculo explica a necessidade do convite.
+- CONCLUÍDO: sintaxe JavaScript do login e Master verificada.
+- A VALIDAR: deploy do Render + GitHub Pages, cadastro Master real, convite e ativação, emailVerified, isolamento de dados, status de organização e segurança das rotas.
+- PENDENTE: implementar fila de publicação/aprovação por evento e permissão de autonomia revogável. A aprovação atual é de organização/solicitação, não do primeiro evento.
+- PENDENTE: definir e persistir prazo final de pagamento separado do prazo de inscrição; rotina server-side idempotente para gerar chaves após expirar pagamentos, com reconciliação de webhooks.
+- PENDENTE: catálogo oficial completo de pesos, idades e faixas separado por Gi e No-Gi, adulto e infantil, com fonte e versão.
+- PENDENTE: experiência pública autenticada de atleta, inscrição e gateway de pagamento (Pix/cartão, webhook, reembolso).
+- PENDENTE: testes funcionais completos em staging e em dispositivos móveis.
+- NÃO REMOVER AINDA: rotas e arquivos legados de acompanhamento e convite, ainda usados por ativações antigas.
